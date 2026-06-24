@@ -3,9 +3,10 @@ import logging
 import time
 from dataclasses import dataclass
 from threading import Condition, Thread
-from typing import Any, Generator
+from typing import Generator
 
-from websockets.sync.server import serve
+from websockets import ConnectionClosed
+from websockets.sync.server import ServerConnection, serve
 
 
 @dataclass
@@ -47,7 +48,7 @@ class Communication:
     logger: logging.Logger
     event: Condition
     pending: list[dict]
-    server: Any
+    websockets: list[ServerConnection]
     ws_th: Thread
 
     def __init__(self, port: int = 8765) -> None:
@@ -61,6 +62,7 @@ class Communication:
 
     def _handler(self, websocket) -> None:
         """Handles incoming messages from the client."""
+        self.websockets.append(websocket)  # FIXME: multithreading will break
         for message in websocket:
             data = json.loads(message)
             with self.event:
@@ -73,20 +75,24 @@ class Communication:
             with self.event:
                 for i, data in enumerate(self.pending):
                     if data["type"] == type:
-                        return self.pending.pop(i)
+                        return self.pending.pop(i)["payload"]
                 self.event.wait()
 
     def _send(self, type: str, payload: dict) -> None:
         """Sends a request to the client."""
-        self.server.send(
-            json.dumps(
-                {
-                    "stamp": time.time(),
-                    "type": type,
-                    "payload": payload,
-                }
-            )
-        )
+        for ws in self.websockets:
+            try:
+                ws.send(
+                    json.dumps(
+                        {
+                            "stamp": time.time(),
+                            "type": type,
+                            "payload": payload,
+                        }
+                    )
+                )
+            except ConnectionClosed:
+                self.websockets.remove(ws)
 
     def look(self) -> DoneLook:
         """Sends a look request to the client and waits for the response."""
