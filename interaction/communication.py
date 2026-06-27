@@ -40,47 +40,38 @@ class Feedback:
 
 
 class Communication:
-    """Starts a websocket server and handles the communication.
-
-    This sends a request and waits on a threading event for a response of a certain type. The response is then returned to the caller.
-    """
-
     logger: logging.Logger
-    event: Condition
+    new_pending: Condition
     pending: list[dict]
-    websockets: list[ServerConnection]
+    clients: list[ServerConnection]
     ws_th: Thread
 
     def __init__(self, port: int = 8765) -> None:
-        """Starts a websocket server on the given port."""
         self.logger = logging.getLogger(__name__)
-        self.event = Condition()
+        self.new_pending = Condition()
         self.pending = []
-        self.server = serve(self._handler, "localhost", port)
-        self.ws_th = Thread(target=self.server.serve_forever, daemon=True)
+        server = serve(self._handler, "localhost", port)
+        self.ws_th = Thread(target=server.serve_forever, daemon=True)
         self.ws_th.start()
 
     def _handler(self, websocket) -> None:
-        """Handles incoming messages from the client."""
-        self.websockets.append(websocket)  # FIXME: multithreading will break
+        self.clients.append(websocket)  # FIXME: multithreading will break
         for message in websocket:
             data = json.loads(message)
-            with self.event:
+            with self.new_pending:
                 self.pending.append(data)
-                self.event.notify_all()
+                self.new_pending.notify_all()
 
-    def _look_for(self, type: str) -> dict:
-        """Looks for a response of a certain type in the queue."""
+    def _wait_for(self, m_type: str) -> dict:
         while True:
-            with self.event:
+            with self.new_pending:
                 for i, data in enumerate(self.pending):
-                    if data["type"] == type:
+                    if data["type"] == m_type:
                         return self.pending.pop(i)["payload"]
-                self.event.wait()
+                self.new_pending.wait()
 
     def _send(self, type: str, payload: dict) -> None:
-        """Sends a request to the client."""
-        for ws in self.websockets:
+        for ws in self.clients:
             try:
                 ws.send(
                     json.dumps(
@@ -92,29 +83,48 @@ class Communication:
                     )
                 )
             except ConnectionClosed:
-                self.websockets.remove(ws)
+                self.clients.remove(ws)
+
+    def look_async(self) -> None:
+        self._send("look", {})
+
+    def wait_done_look(self) -> DoneLook:
+        return DoneLook(**self._wait_for("done-look"))
 
     def look(self) -> DoneLook:
-        """Sends a look request to the client and waits for the response."""
-        self._send("look", {})
-        return DoneLook(**self._look_for("done-look"))
+        self.look_async()
+        return self.wait_done_look()
+
+    def find_async(self, noun: str, adjectives: list[str]) -> None:
+        self._send("find", {"noun": noun, "adj": adjectives})
+
+    def wait_done_find(self) -> DoneFind:
+        return DoneFind(**self._wait_for("done-find"))
 
     def find(self, noun: str, adjectives: list[str]) -> DoneFind:
-        """Sends a find request to the client and waits for the response."""
-        self._send("find", {"noun": noun, "adj": adjectives})
-        return DoneFind(**self._look_for("done-find"))
+        self.find_async(noun, adjectives)
+        return self.wait_done_find()
+
+    def deliver_async(self, payload: object) -> None:
+        self._send("deliver", {"payload": payload})
+
+    def wait_done_deliver(self) -> DoneDeliver:
+        return DoneDeliver(**self._wait_for("done-deliver"))
 
     def deliver(self, payload: object) -> DoneDeliver:
-        """Sends a deliver request to the client and waits for the response."""
-        self._send("deliver", {"payload": payload})
-        return DoneDeliver(**self._look_for("done-deliver"))
+        self.deliver_async(payload)
+        return self.wait_done_deliver()
+
+    def stop_async(self) -> None:
+        self._send("stop", {})
+
+    def wait_done_stop(self) -> DoneStop:
+        return DoneStop(**self._wait_for("done-stop"))
 
     def stop(self) -> DoneStop:
-        """Sends a stop request to the client and waits for the response."""
-        self._send("stop", {})
-        return DoneStop(**self._look_for("done-stop"))
+        self.stop_async()
+        return self.wait_done_stop()
 
     def get_feedback(self) -> Generator[Feedback, None, None]:
-        """Blocks until feedback is received from the client and yields it."""
         while True:
-            yield Feedback(**self._look_for("feedback"))
+            yield Feedback(**self._wait_for("feedback"))
