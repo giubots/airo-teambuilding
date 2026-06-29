@@ -7,7 +7,7 @@ and a **Reachy Mini** baked in.
   continuous forefront-face following (`FaceTracker`, MediaPipe detection), and
   spoken chat — `listen()` (mic speech-to-text), `reply()`, `converse()`. Used by `main.py`.
 - `robot_demo.py` — follow a face: `python -m interaction.robot_demo`
-- `conversation.py` — talk with Reachy: `python -m interaction.conversation`
+- `conversation.py` — talk with Lionel: `python -m interaction.conversation`
 - `communication.py` — websocket command bridge · `dialogue.py` — LLM dialogue
 
 ## Robot

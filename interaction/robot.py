@@ -284,7 +284,7 @@ class ReachyMiniRobot:
         block=False offloads synthesis + playback to a background thread so the
         face-following loop never freezes; overlapping calls are dropped.
         """
-        self.logger.info("Reachy says: %s", text)
+        self.logger.info("Lionel says: %s", text)
         if not text.strip():
             return
         if not block:
@@ -442,7 +442,7 @@ class ReachyMiniRobot:
         if not hasattr(self, "_chat"):
             sys_p = (_PERSONALITY + " Keep replies to one or two short sentences. "
                      "Use plain words only, no emoji. "
-                     "You are a small robot named Reachy talking face to face.")
+                     "You are a small robot named Lionel talking face to face.")
             self._chat = [{"role": "system", "content": sys_p}]
 
     def _remember(self, out: str) -> None:
@@ -488,7 +488,7 @@ class ReachyMiniRobot:
 
     def converse(self, turns: int = 6, listen_secs: float = 5.0) -> None:
         """Short spoken back-and-forth: listen, think, speak — `turns` times."""
-        self.say("Hi! I'm Reachy. Talk to me!", block=True)
+        self.say("Hi! I'm Lionel. Talk to me!", block=True)
         for _ in range(turns):
             heard = self.listen(listen_secs)
             if not heard:
@@ -561,7 +561,7 @@ class ReachyMiniRobot:
     def _chat_loop(self, listen_secs: float = 4.0) -> None:
         """Converse in the background while the head keeps tracking the face.
 
-        Pauses the mic while Reachy speaks, and streams the reply
+        Pauses the mic while Lionel speaks, and streams the reply
         sentence-by-sentence so audio starts almost immediately. While
         thinking/dance mode is on the whole conversation stays silent: no
         greeting, listening, replying or speaking.
@@ -572,7 +572,7 @@ class ReachyMiniRobot:
                 time.sleep(0.15)
                 continue
             if not greeted:  # greet only once we're actually allowed to speak
-                self.say("Hi! I'm Reachy. Talk to me!", block=False)
+                self.say("Hi! I'm Lionel. Talk to me!", block=False)
                 greeted = True
                 continue
             heard = self.listen(listen_secs)
@@ -588,7 +588,7 @@ class ReachyMiniRobot:
 
         The face-following loop keeps the gaze engaged: the world-frame head
         pose stays locked on the participant (the IK holds it while the body
-        swivels), so Reachy looks busy-but-attentive while you wait on it.
+        swivels), so Lionel looks busy-but-attentive while you wait on it.
         Speech is suppressed while thinking so the modes stay separate.
         """
         on = bool(on)
