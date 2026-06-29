@@ -9,6 +9,7 @@ The connection auto-detects Lite vs Wireless and localhost vs network.
 """
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -28,6 +29,13 @@ except Exception:  # pragma: no cover - missing pyttsx3 or audio device
     _tts = None
 
 Face = Tuple[int, int, int, int]
+
+
+def _roll_pose(pose, roll_rad: float):
+    """Add a head roll (rotation about the look axis) to a 4x4 head pose."""
+    c, s = math.cos(roll_rad), math.sin(roll_rad)
+    rx = np.array([[1, 0, 0, 0], [0, c, -s, 0], [0, s, c, 0], [0, 0, 0, 1]])
+    return pose @ rx
 
 
 @dataclass
@@ -54,6 +62,11 @@ class FaceTracker:
         self.detect_width = detect_width
         self.sx: Optional[float] = None
         self.sy: Optional[float] = None
+        self._still_since: Optional[float] = None  # when the face went still
+
+    def is_still(self, settle: float = 1.5) -> bool:
+        """True once the locked face has barely moved for `settle` seconds."""
+        return self._still_since is not None and (time.time() - self._still_since) > settle
 
     def detect(self, frame) -> List[Face]:
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
@@ -78,8 +91,11 @@ class FaceTracker:
         u = x + w / 2
         v = y + h * (0.5 + self.aim_down_frac)
         a = self.smooth
+        prev_x, prev_y = self.sx, self.sy
         self.sx = u if self.sx is None else a * u + (1 - a) * self.sx
         self.sy = v if self.sy is None else a * v + (1 - a) * self.sy
+        if prev_x is None or abs(self.sx - prev_x) > 25 or abs(self.sy - prev_y) > 25:
+            self._still_since = time.time()  # moved: reset stillness timer
         return self.sx, self.sy
 
 
@@ -125,6 +141,10 @@ class ReachyMiniRobot:
         if self._follow:
             return
         self._follow = True
+        try:
+            self.mini.media.start_recording()  # mic on for talk detection (DoA)
+        except Exception as e:  # pragma: no cover - no audio device
+            self.logger.warning("mic start failed: %s", e)
         self._th = threading.Thread(target=self._loop, daemon=True)
         self._th.start()
 
@@ -132,6 +152,10 @@ class ReachyMiniRobot:
         self._follow = False
         if self._th:
             self._th.join(timeout=1.0)
+        try:
+            self.mini.media.stop_recording()
+        except Exception:
+            pass
         self.mini.goto_target(create_head_pose(), antennas=[0.0, 0.0], duration=1.0)
 
     def _loop(self) -> None:
@@ -143,11 +167,26 @@ class ReachyMiniRobot:
                 continue
             aim = self._tracker.update(self._tracker.detect(frame))
             miss = 0 if aim else miss + 1
+
+            # Wiggle the antennas while the focused (front) person is talking.
+            antennas = [0.0, 0.0]
+            try:
+                doa = self.mini.media.get_DoA()
+            except Exception:
+                doa = None
+            if doa is not None and doa[1] and aim and abs(doa[0] - math.pi / 2) < 0.9:
+                wig = math.sin(2 * math.pi * 3.0 * time.time()) * 0.4
+                antennas = [wig, -wig]
+
             if self._tracker.sx is not None and miss < 8:
                 pose = self.mini.look_at_image(int(self._tracker.sx),
                                                int(self._tracker.sy),
                                                duration=0, perform_movement=False)
-                self.mini.set_target(head=pose)
+                # Sitting still: relaxed back-and-forth head tilt (slow roll).
+                if self._tracker.is_still():
+                    roll = math.radians(13) * math.sin(2 * math.pi * 0.2 * time.time())
+                    pose = _roll_pose(pose, roll)
+                self.mini.set_target(head=pose, antennas=antennas)
             time.sleep(0.03)
 
     def close(self) -> None:
