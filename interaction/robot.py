@@ -604,15 +604,26 @@ class ReachyMiniRobot:
             stop = self._music_stop
 
             def _music():
-                while not stop.is_set():
+                try:
+                    while not stop.is_set():
+                        try:
+                            self.mini.media.play_sound(path)
+                        except Exception:
+                            pass
+                        if stop.wait(8.0):  # wake the instant we leave thinking mode
+                            break
+                finally:
                     try:
-                        self.mini.media.play_sound(path)
+                        self.mini.media.stop_playing()  # silence the last clip
                     except Exception:
                         pass
-                    time.sleep(8.0)
             threading.Thread(target=_music, daemon=True).start()
         elif self._music_stop is not None:
             self._music_stop.set()
+            try:
+                self.mini.media.stop_playing()  # cut the music now, don't wait it out
+            except Exception:
+                pass
 
     def _loop(self) -> None:
         ax = ay = None  # last applied aim (deadzone gate)
