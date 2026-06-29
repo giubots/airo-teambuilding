@@ -30,6 +30,11 @@ from reachy_mini.utils import create_head_pose
 _PERSONALITY_FILE = Path(__file__).with_name("personality.txt")
 _PERSONALITY = _PERSONALITY_FILE.read_text(encoding="utf-8").strip() if _PERSONALITY_FILE.exists() else ""
 
+# Loudness: peak-normalise every clip near full-scale + extra gain so the small
+# robot speaker is audible (REACHY_TTS_GAIN tunes it; 1.0 = normalise only).
+_TARGET_PEAK = 0.97
+_GAIN = float(os.getenv("REACHY_TTS_GAIN", "1.6"))
+
 _openai = None
 if os.getenv("OPENAI_API_KEY"):
     try:  # cloud voice (openai-tts branch); falls back to pyttsx3 below
@@ -124,6 +129,11 @@ class FaceTracker:
         self.detector = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
+        try:  # MediaPipe: robust to tilt/profile, ~9ms; full range (model 1)
+            from mediapipe.python.solutions import face_detection as mpfd
+            self._mp = mpfd.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+        except Exception:
+            self._mp = None
         self.smooth = smooth
         self.lock_gate = lock_gate
         self.aim_down_frac = aim_down_frac
@@ -144,6 +154,16 @@ class FaceTracker:
         return self.sx is not None and (time.time() - self._seen) < self.hold_secs
 
     def detect(self, frame) -> List[Face]:
+        """Faces in full-frame pixels via MediaPipe (Haar+equalize fallback)."""
+        h, w = frame.shape[:2]
+        if self._mp is not None:
+            res = self._mp.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            faces: List[Face] = []
+            for d in (res.detections or []):
+                b = d.location_data.relative_bounding_box
+                faces.append((int(b.xmin * w), int(b.ymin * h),
+                              int(b.width * w), int(b.height * h)))
+            return faces
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # SDK frames are BGR
         scale = min(1.0, self.detect_width / gray.shape[1])
         small = cv2.equalizeHist(cv2.resize(gray, None, fx=scale, fy=scale))
@@ -228,6 +248,25 @@ class ReachyMiniRobot:
         except Exception:
             return 1.5
 
+    @staticmethod
+    def _boost_wav(path: str) -> None:
+        """Peak-normalise a 16-bit WAV in place so the robot speaker is loud enough."""
+        try:
+            with closing(wave.open(path, "rb")) as w:
+                ch, sw, rate, n = (w.getnchannels(), w.getsampwidth(),
+                                   w.getframerate(), w.getnframes())
+                raw = w.readframes(n if 0 < n < rate * 600 else rate * 60)
+            if sw != 2 or not raw:
+                return
+            a = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+            peak = float(np.max(np.abs(a))) or 1.0
+            a = np.clip(a * (_TARGET_PEAK * 32767.0 / peak) * _GAIN, -32768, 32767)
+            with closing(wave.open(path, "wb")) as w:
+                w.setnchannels(ch); w.setsampwidth(2); w.setframerate(rate)
+                w.writeframes(a.astype(np.int16).tobytes())
+        except Exception:
+            pass
+
     def _synth_wav(self, text: str, path: str) -> bool:
         if _openai is not None:
             try:
@@ -235,12 +274,14 @@ class ReachyMiniRobot:
                                                 input=text, instructions=_PERSONALITY,
                                                 response_format="wav")
                 r.write_to_file(path)
+                self._boost_wav(path)
                 return True
             except Exception:
                 pass
         if _tts is not None:
             _tts.save_to_file(text, path)
             _tts.runAndWait()
+            self._boost_wav(path)
             return os.path.exists(path)
         return False
 

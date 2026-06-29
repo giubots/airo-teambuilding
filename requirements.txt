@@ -9,6 +9,7 @@ wheel==0.46.2
 # Reachy Mini robot control (baked into interaction/robot.py)
 reachy-mini[mujoco]
 opencv-python
+mediapipe==0.10.14
 pyttsx3
 openai
 python-dotenv
