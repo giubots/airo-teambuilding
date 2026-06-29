@@ -54,10 +54,18 @@ class Communication:
         self.ws_th = Thread(target=server.serve_forever, daemon=True)
         self.ws_th.start()
 
+    def _send_to_all_clients(self, message: str) -> None:
+        for client in self.clients:
+            try:
+                client.send(message)
+            except ConnectionClosed:
+                self.clients.remove(client)
+
     def _handler(self, websocket) -> None:
         self.clients.append(websocket)  # FIXME: multithreading will break
         for message in websocket:
             data = json.loads(message)
+            self._send_to_all_clients(message)
             with self.new_pending:
                 self.pending.append(data)
                 self.new_pending.notify_all()
@@ -71,19 +79,15 @@ class Communication:
                 self.new_pending.wait()
 
     def _send(self, type: str, payload: dict) -> None:
-        for ws in self.clients:
-            try:
-                ws.send(
-                    json.dumps(
-                        {
-                            "stamp": time.time(),
-                            "type": type,
-                            "payload": payload,
-                        }
-                    )
-                )
-            except ConnectionClosed:
-                self.clients.remove(ws)
+        self._send_to_all_clients(
+            json.dumps(
+                {
+                    "stamp": time.time(),
+                    "type": type,
+                    "payload": payload,
+                }
+            )
+        )
 
     def look_async(self) -> None:
         self._send("look", {})
