@@ -273,6 +273,8 @@ class ReachyMiniRobot:
         self._th: Optional[threading.Thread] = None
         self._speaking = threading.Lock()
         self._thinking = False
+        self._playbook = False
+        self._pb_stop: Optional[threading.Event] = None
         self._dance_t0 = 0.0
         self._music_stop: Optional[threading.Event] = None
         if greet:
@@ -531,7 +533,7 @@ class ReachyMiniRobot:
         mime = "png" if ext == ".png" else "jpeg"
         return f"data:image/{mime};base64,{b64}" if data_url else b64
 
-    def start_following(self, chat: bool = False) -> None:
+    def start_following(self, chat: bool = False, playbook: bool = False) -> None:
         if self._follow:
             return
         self._follow = True
@@ -541,13 +543,23 @@ class ReachyMiniRobot:
             self.logger.warning("mic start failed: %s", e)
         self._th = threading.Thread(target=self._loop, daemon=True)
         self._th.start()
-        if chat:
+        if playbook:
+            # Scripted backpack flow: wait for 'Hi Lionel!', take an order, then
+            # enter thinking while it 'picks' the item. The playbook owns
+            # entering thinking; the operator may only exit it (toggle_thinking).
+            from .playbook import start_playbook
+            self._playbook = True
+            self._pb_stop = start_playbook(self)
+        elif chat:
             self._chat_stop = threading.Event()
             threading.Thread(target=self._chat_loop, daemon=True).start()
 
     def stop_following(self) -> None:
         self._follow = False
         self.set_thinking(False)
+        if self._pb_stop is not None:
+            self._pb_stop.set()
+        self._playbook = False
         if getattr(self, "_chat_stop", None):
             self._chat_stop.set()
         if self._th:
@@ -582,6 +594,22 @@ class ReachyMiniRobot:
                 continue
             self.logger.info("Heard: %s", heard)
             self.speak_stream(self.reply_stream(heard)).result()
+
+    @property
+    def thinking(self) -> bool:
+        """Whether 'thinking/doing' mode is currently on (read-only)."""
+        return self._thinking
+
+    def toggle_thinking(self) -> None:
+        """Operator control for thinking mode (exit-only during the playbook).
+
+        Exiting is always allowed; manually *entering* is only allowed outside
+        the playbook, which owns entering thinking so the modes never mix.
+        """
+        if self._thinking:
+            self.set_thinking(False)
+        elif not self._playbook:
+            self.set_thinking(True)
 
     def set_thinking(self, on: bool) -> None:
         """Toggle 'thinking/doing' mode: swivel the body + loop elevator music.

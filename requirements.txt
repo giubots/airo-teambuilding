@@ -30,3 +30,6 @@ mediapipe==0.10.14
 pyttsx3
 openai
 python-dotenv
+# Secure upload (SCP over SSH) of backpack_request.json to a remote server
+paramiko
+scp
