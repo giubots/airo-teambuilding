@@ -9,8 +9,8 @@ import subprocess
 from collections.abc import Generator
 from concurrent.futures import Future
 from pathlib import Path
-from queue import Queue
-from threading import Thread
+from queue import Full, Queue
+from threading import Event, Lock, Thread
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -47,9 +47,13 @@ def _synthesize(text: str) -> bytes | None:
     return response.content
 
 
-def _play(audio: bytes | None) -> None:
-    """Play mp3 bytes through the radio filter and block until playback ends."""
-    if not audio:
+def _play(audio: bytes | None, register, stop_event) -> None:
+    """Play mp3 bytes through the radio filter and block until playback ends.
+
+    Registers the live processes so a concurrent stop() can kill them; bails
+    out early if stop was already requested.
+    """
+    if not audio or stop_event.is_set():
         return
 
     ffmpeg = subprocess.Popen(
@@ -66,27 +70,65 @@ def _play(audio: bytes | None) -> None:
         ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
         stdin=ffmpeg.stdout,
     )
-    ffmpeg.stdin.write(audio)
-    ffmpeg.stdin.close()
+    register(ffmpeg, ffplay)
+    try:
+        ffmpeg.stdin.write(audio)
+        ffmpeg.stdin.close()
+    except BrokenPipeError:
+        pass  # stop() killed the process mid-write
     ffplay.wait()
+    register(None, None)
 
 
-def speech(sentences: Generator[str], prefetch: int = 3) -> Future[str]:
+class SpeechHandle(Future):
+    """Future[str] that also lets the caller interrupt playback via stop()."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._stop = Event()
+        self._lock = Lock()
+        self._procs: tuple = (None, None)
+
+    def _register(self, ffmpeg, ffplay) -> None:
+        with self._lock:
+            self._procs = (ffmpeg, ffplay)
+
+    def stop(self) -> None:
+        """Interrupt: kill current playback, skip all remaining sentences."""
+        self._stop.set()
+        with self._lock:
+            for proc in self._procs:
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+
+
+def speech(sentences: Generator[str], prefetch: int = 3) -> SpeechHandle:
     """Play a stream of sentences sequentially on the speakers.
 
-    Returns immediately with a Future that resolves to the full spoken text
-    once every sentence has finished playing. Up to ``prefetch`` sentences are
-    synthesised ahead while the current one plays, so playback stays gapless;
-    audio is still played strictly in order, one fully before the next.
+    Returns immediately with a SpeechHandle (a Future[str]) that resolves to
+    the full spoken text once every sentence has finished playing. Up to
+    ``prefetch`` sentences are synthesised ahead while the current one plays,
+    so playback stays gapless; audio is played strictly in order. Call
+    handle.stop() at any time to halt playback and skip remaining sentences;
+    the future then resolves to the text spoken so far.
     """
-    result: Future[str] = Future()
+    result = SpeechHandle()
     # bounded prefetch: producer renders up to `prefetch` ahead of the consumer
     pipeline: Queue[tuple[str, bytes | None] | None] = Queue(maxsize=max(1, prefetch))
 
     def _produce() -> None:
         try:
             for sentence in sentences:
-                pipeline.put((sentence, _synthesize(sentence)))
+                if result._stop.is_set():
+                    break
+                audio = _synthesize(sentence)
+                # block until there's room, but wake periodically to check stop
+                while not result._stop.is_set():
+                    try:
+                        pipeline.put((sentence, audio), timeout=0.1)
+                        break
+                    except Full:
+                        continue
         except Exception as exc:  # noqa: BLE001 — forward to consumer
             pipeline.put(exc)
         else:
@@ -95,16 +137,19 @@ def speech(sentences: Generator[str], prefetch: int = 3) -> Future[str]:
     def _consume() -> None:
         spoken: list[str] = []
         try:
-            while True:
+            while not result._stop.is_set():
                 item = pipeline.get()
                 if item is None:
                     break
                 if isinstance(item, Exception):
                     raise item
                 sentence, audio = item
-                _play(audio)
+                _play(audio, result._register, result._stop)
+                if result._stop.is_set():
+                    break
                 spoken.append(sentence)
-            result.set_result(" ".join(spoken))
+            if not result.done():
+                result.set_result(" ".join(spoken))
         except Exception as exc:  # noqa: BLE001 — surface to the future caller
             result.set_exception(exc)
 
