@@ -10,10 +10,15 @@ The connection auto-detects Lite vs Wireless and localhost vs network.
 
 import logging
 import math
+import os
 import random
+import tempfile
 import threading
 import time
+import wave
+from contextlib import closing
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import cv2
@@ -21,6 +26,18 @@ import numpy as np
 
 from reachy_mini import ReachyMini
 from reachy_mini.utils import create_head_pose
+
+_PERSONALITY_FILE = Path(__file__).with_name("personality.txt")
+_PERSONALITY = _PERSONALITY_FILE.read_text(encoding="utf-8").strip() if _PERSONALITY_FILE.exists() else ""
+
+_openai = None
+if os.getenv("OPENAI_API_KEY"):
+    try:  # cloud voice (openai-tts branch); falls back to pyttsx3 below
+        from openai import OpenAI
+
+        _openai = OpenAI()
+    except Exception:
+        _openai = None
 
 try:  # optional offline text-to-speech
     import pyttsx3
@@ -182,11 +199,57 @@ class ReachyMiniRobot:
         if greet:
             self.greet()
 
-    def say(self, text: str) -> None:
+    def say(self, text: str, block: bool = True) -> None:
+        """Speak through the robot's own speaker (OpenAI TTS, else offline)."""
         self.logger.info("Reachy says: %s", text)
+        if not text.strip():
+            return
+        path = os.path.join(tempfile.gettempdir(), "reachy_say.wav")
+        if not self._synth_wav(text, path):
+            return
+        try:
+            self.mini.media.play_sound(path)
+            if block:
+                time.sleep(self._wav_seconds(path) + 0.2)
+        except Exception as e:  # pragma: no cover - audio backend missing
+            self.logger.warning("play_sound failed: %s", e)
+
+    @staticmethod
+    def _wav_seconds(path: str) -> float:
+        try:
+            with closing(wave.open(path, "rb")) as w:
+                return w.getnframes() / float(w.getframerate() or 1)
+        except Exception:
+            return 1.5
+
+    def _synth_wav(self, text: str, path: str) -> bool:
+        if _openai is not None:
+            try:
+                r = _openai.audio.speech.create(model="gpt-4o-mini-tts", voice="coral",
+                                                input=text, instructions=_PERSONALITY,
+                                                response_format="wav")
+                r.write_to_file(path)
+                return True
+            except Exception:
+                pass
         if _tts is not None:
-            _tts.say(text)
+            _tts.save_to_file(text, path)
             _tts.runAndWait()
+            return os.path.exists(path)
+        return False
+
+    def record(self, seconds: float = 3.0) -> np.ndarray:
+        """Capture mono float32 audio from the mic array (scaffolding for STT)."""
+        self.mini.media.start_recording()
+        chunks, end = [], time.time() + seconds
+        while time.time() < end:
+            s = self.mini.media.get_audio_sample()
+            if s is not None:
+                a = np.asarray(s, dtype=np.float32)
+                chunks.append(a.mean(axis=1) if a.ndim > 1 else a)
+            else:
+                time.sleep(0.01)
+        return np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
 
     def happy(self) -> None:
         self.mini.goto_target(antennas=[0.5, -0.5], duration=0.4)

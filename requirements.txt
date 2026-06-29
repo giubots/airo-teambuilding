@@ -10,3 +10,5 @@ wheel==0.46.2
 reachy-mini[mujoco]
 opencv-python
 pyttsx3
+openai
+python-dotenv
