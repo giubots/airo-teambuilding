@@ -102,7 +102,7 @@ class FaceTracker:
     """
 
     def __init__(self, smooth: float = 0.4, lock_gate: int = 350,
-                 aim_down_frac: float = 0.45, detect_width: int = 640) -> None:
+                 aim_down_frac: float = 0.45, detect_width: int = 1920) -> None:
         self.detector = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
@@ -120,9 +120,9 @@ class FaceTracker:
 
     def detect(self, frame) -> List[Face]:
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        scale = self.detect_width / gray.shape[1]
-        small = cv2.resize(gray, None, fx=scale, fy=scale)
-        boxes = self.detector.detectMultiScale(small, 1.15, 6, minSize=(30, 30))
+        scale = min(1.0, self.detect_width / gray.shape[1])
+        small = cv2.equalizeHist(cv2.resize(gray, None, fx=scale, fy=scale))
+        boxes = self.detector.detectMultiScale(small, 1.1, 4, minSize=(48, 48))
         return [(int(x / scale), int(y / scale), int(w / scale), int(h / scale))
                 for (x, y, w, h) in boxes]
 
