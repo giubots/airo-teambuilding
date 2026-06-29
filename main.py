@@ -122,16 +122,17 @@ def start_chat(comm: Communication):
         demo.comm.stop_async()
         demo.comm.wait_done_stop()
 
-def analyse():
+def analyse(payload: object):
     print("Analysing the image")
+    print(payload)
 
-def relay_message():
+def relay_message(payload: object):
     print("Relaying the message")
+    print(payload)
 
 
 def main():
     comm = Communication()
-    comm.register_callback("start", start_chat)
     comm.register_callback("done-look", analyse)
     comm.register_callback("done-find", relay_message)
     start_chat(comm)
