@@ -119,6 +119,38 @@ def _scp_config() -> dict:
     }
 
 
+def _ensure_remote_dir(ssh, remote_path: str) -> None:
+    """Best-effort 'mkdir -p' of the directory that will hold remote_path.
+
+    SCP errors out when the destination directory is missing, so create the
+    parent chain over SFTP first. Never raises - it is purely a convenience.
+    """
+    import posixpath
+    directory = (remote_path if remote_path.endswith("/")
+                 else posixpath.dirname(remote_path)).rstrip("/")
+    if not directory:
+        return
+    sftp = ssh.open_sftp()
+    try:
+        cur = "/" if directory.startswith("/") else ""
+        for part in directory.split("/"):
+            if not part:
+                continue
+            cur = posixpath.join(cur, part) if cur else part
+            try:
+                sftp.stat(cur)
+            except IOError:
+                try:
+                    sftp.mkdir(cur)
+                except IOError:
+                    pass
+    finally:
+        try:
+            sftp.close()
+        except Exception:
+            pass
+
+
 def upload_request(path: str = REQUEST_PATH, cfg: dict = None) -> bool:
     """Securely copy the saved request to the remote server over SSH (SCP).
 
@@ -160,6 +192,7 @@ def upload_request(path: str = REQUEST_PATH, cfg: dict = None) -> bool:
         else:
             connect["password"] = cfg["password"]
         ssh.connect(**connect)
+        _ensure_remote_dir(ssh, cfg["remote_path"])
         with SCPClient(ssh.get_transport()) as scp:
             scp.put(path, cfg["remote_path"])
         print(f"[scp] uploaded {os.path.basename(path)} to "
