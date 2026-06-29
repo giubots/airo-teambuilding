@@ -218,7 +218,13 @@ class ReachyMiniRobot:
     def _wav_seconds(path: str) -> float:
         try:
             with closing(wave.open(path, "rb")) as w:
-                return w.getnframes() / float(w.getframerate() or 1)
+                ch, sw, rate, n = (w.getnchannels(), w.getsampwidth(),
+                                   w.getframerate(), w.getnframes())
+            if 0 < n < rate * 600:
+                secs = n / float(rate or 1)
+            else:  # OpenAI WAVs use an unknown-length sentinel; use file size
+                secs = max(0, os.path.getsize(path) - 44) / float(rate * ch * sw or 1)
+            return min(secs, 60.0)
         except Exception:
             return 1.5
 
