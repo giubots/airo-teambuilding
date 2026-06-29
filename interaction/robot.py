@@ -11,11 +11,13 @@ The connection auto-detects Lite vs Wireless and localhost vs network.
 import logging
 import math
 import os
+import queue
 import random
 import tempfile
 import threading
 import time
 import wave
+from concurrent.futures import Future
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,14 @@ _PERSONALITY = _PERSONALITY_FILE.read_text(encoding="utf-8").strip() if _PERSONA
 # robot speaker is audible (REACHY_TTS_GAIN tunes it; 1.0 = normalise only).
 _TARGET_PEAK = 0.97
 _GAIN = float(os.getenv("REACHY_TTS_GAIN", "1.6"))
+
+
+def _sentence_end(buf: str) -> int:
+    """Index just past the first sentence-ending . ! ? in buf, else -1."""
+    for i, c in enumerate(buf):
+        if c in ".!?" and (i + 1 >= len(buf) or buf[i + 1] in " \n\t"):
+            return i + 1
+    return -1
 
 _openai = None
 if os.getenv("OPENAI_API_KEY"):
@@ -338,11 +348,7 @@ class ReachyMiniRobot:
 
     def reply(self, text: str) -> str:
         """One-or-two-sentence reply in the child personality (rolling history)."""
-        if not hasattr(self, "_chat"):
-            sys_p = (_PERSONALITY + " Keep replies to one or two short sentences. "
-                     "Use plain words only, no emoji. "
-                     "You are a small robot named Reachy talking face to face.")
-            self._chat = [{"role": "system", "content": sys_p}]
+        self._chat_init()
         self._chat.append({"role": "user", "content": text})
         if _openai is None:
             out = "Wow, that's so cool! Tell me more!"
@@ -353,10 +359,84 @@ class ReachyMiniRobot:
                 out = (r.choices[0].message.content or "").strip()
             except Exception:
                 out = "Hmm, I didn't quite get that. Say it again?"
+        self._remember(out)
+        return out
+
+    def reply_stream(self, text: str):
+        """Stream the reply, yielding each sentence as soon as it completes."""
+        self._chat_init()
+        self._chat.append({"role": "user", "content": text})
+        if _openai is None:
+            out = "Wow, that's so cool! Tell me more!"
+            self._remember(out)
+            yield out
+            return
+        buf, full = "", []
+        try:
+            stream = _openai.chat.completions.create(model="gpt-4o-mini", temperature=0.8,
+                                                     max_tokens=80, messages=self._chat,
+                                                     stream=True)
+            for chunk in stream:
+                buf += chunk.choices[0].delta.content or ""
+                while (cut := _sentence_end(buf)) >= 0:
+                    s, buf = buf[:cut].strip(), buf[cut:].lstrip()
+                    if s:
+                        full.append(s)
+                        yield s
+            if buf.strip():
+                full.append(buf.strip())
+                yield buf.strip()
+        except Exception:
+            yield "Hmm, I didn't quite get that. Say it again?"
+        self._remember(" ".join(full))
+
+    def _chat_init(self) -> None:
+        if not hasattr(self, "_chat"):
+            sys_p = (_PERSONALITY + " Keep replies to one or two short sentences. "
+                     "Use plain words only, no emoji. "
+                     "You are a small robot named Reachy talking face to face.")
+            self._chat = [{"role": "system", "content": sys_p}]
+
+    def _remember(self, out: str) -> None:
         self._chat.append({"role": "assistant", "content": out})
         if len(self._chat) > 17:
             self._chat = [self._chat[0]] + self._chat[-16:]
-        return out
+
+    def speak_stream(self, sentences) -> Future:
+        """Speak a sentence stream gapless: synth ahead while playing in order."""
+        fut: Future = Future()
+        pipe: queue.Queue = queue.Queue(maxsize=2)
+
+        def produce():
+            i = 0
+            for s in sentences:
+                if not s.strip():
+                    continue
+                p = os.path.join(tempfile.gettempdir(), f"reachy_stream_{i % 4}.wav")
+                i += 1
+                if self._synth_wav(s, p):
+                    pipe.put((s, p))
+            pipe.put(None)
+
+        def consume():
+            spoken = []
+            self._speaking.acquire()  # pause mic STT while speaking
+            try:
+                while (item := pipe.get()) is not None:
+                    s, p = item
+                    try:
+                        self.mini.media.play_sound(p)
+                        time.sleep(self._wav_seconds(p) + 0.15)
+                    except Exception:
+                        pass
+                    spoken.append(s)
+                fut.set_result(" ".join(spoken))
+            finally:
+                self._speaking.release()
+
+        threading.Thread(target=produce, daemon=True).start()
+        threading.Thread(target=consume, daemon=True).start()
+        return fut
 
     def converse(self, turns: int = 6, listen_secs: float = 5.0) -> None:
         """Short spoken back-and-forth: listen, think, speak — `turns` times."""
@@ -367,7 +447,7 @@ class ReachyMiniRobot:
                 self.say("I didn't catch that. Try again!", block=True)
                 continue
             self.logger.info("Heard: %s", heard)
-            self.say(self.reply(heard), block=True)
+            self.speak_stream(self.reply_stream(heard)).result()
         self.say("Bye bye! That was fun!", block=True)
 
 
@@ -417,7 +497,8 @@ class ReachyMiniRobot:
     def _chat_loop(self, listen_secs: float = 4.0) -> None:
         """Converse in the background while the head keeps tracking the face.
 
-        Pauses the mic while Reachy is speaking so it won't hear its own voice.
+        Pauses the mic while Reachy speaks, and streams the reply
+        sentence-by-sentence so audio starts almost immediately.
         """
         self.say("Hi! I'm Reachy. Talk to me!", block=False)
         while self._follow and not self._chat_stop.is_set():
@@ -430,7 +511,7 @@ class ReachyMiniRobot:
             if not heard:
                 continue
             self.logger.info("Heard: %s", heard)
-            self.say(self.reply(heard), block=False)
+            self.speak_stream(self.reply_stream(heard)).result()
 
     def _loop(self) -> None:
         ax = ay = None  # last applied aim (deadzone gate)
