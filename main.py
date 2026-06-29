@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from interaction.communication import Communication
 from interaction.dialogue import DemoDialogue
+from interaction.robot import ReachyMiniRobot
 from vision_enabled_dialogue.conversation_history.parts import Frame
 from vision_enabled_dialogue.llm import GPT
 
@@ -20,7 +21,7 @@ class DemoInteraction:
     dialogue: DemoDialogue
     comm: Communication
 
-    def __init__(self):
+    def __init__(self, comm: Communication):
         instructions = (
             "You are a helpful assistant that can answer questions about the world."
         )
@@ -55,7 +56,13 @@ class DemoInteraction:
             instructions=instructions,
             vlm=self.gpt,
         )
-        self.comm = Communication()
+        self.comm = comm
+        try:
+            self.robot = ReachyMiniRobot(greet=True)
+            self.robot.start_following()
+        except Exception as e:
+            print(f"Reachy Mini unavailable, continuing without robot: {e}")
+            self.robot = None
         threading.Thread(target=self.communicate_feedback_loop, daemon=True).start()
 
     def look_find_fetch(self, request: str):
@@ -110,16 +117,36 @@ class DemoInteraction:
             )
 
 
-def main():
-    demo = DemoInteraction()
+def start_chat(comm: Communication):
+    print("Starting chat")
+    demo = DemoInteraction(comm)
     try:
         while True:
             user = input("User: ")
+            if demo.robot:
+                demo.robot.happy()
             demo.dialogue.dm.add_turn(user, time())
             demo.dialogue.dm.generate_response()
     except KeyboardInterrupt:
+        if demo.robot:
+            demo.robot.close()
         demo.comm.stop_async()
         demo.comm.wait_done_stop()
+
+def analyse(payload: object):
+    print("Analysing the image")
+    print(payload)
+
+def relay_message(payload: object):
+    print("Relaying the message")
+    print(payload)
+
+
+def main():
+    comm = Communication()
+    comm.register_callback("done-look", analyse)
+    comm.register_callback("done-find", relay_message)
+    start_chat(comm)
 
 
 if __name__ == "__main__":
