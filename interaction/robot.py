@@ -53,6 +53,39 @@ def _sentence_end(buf: str) -> int:
             return i + 1
     return -1
 
+
+_BODY_PEAK_DEG = 28.0   # body swivel each way in 'thinking' mode (<= safe yaw)
+_DANCE_PERIOD = 4.0     # seconds per full left-right-left sway
+
+
+def _swivel_yaw(t: float) -> float:
+    """Body yaw (rad) for a smooth left-right sway at time t."""
+    return math.radians(_BODY_PEAK_DEG) * math.sin(2 * math.pi * t / _DANCE_PERIOD)
+
+
+def _yaw_pose(pose, yaw_rad: float):
+    """Rotate a 4x4 head pose about the vertical axis (to counter the body)."""
+    c, s = math.cos(yaw_rad), math.sin(yaw_rad)
+    rz = np.array([[c, -s, 0, 0], [s, c, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+    return pose @ rz
+
+
+def _make_elevator_wav(path: str, secs: float = 8.0, rate: int = 16000) -> str:
+    """Write a soft, loopable elevator-music clip (simple chord arpeggio)."""
+    chords = [(261, 329, 392), (220, 277, 329), (174, 220, 261), (196, 247, 392)]
+    beat = secs / (len(chords) * 2)
+    out = []
+    for ch in chords * 2:
+        for f in ch:
+            t = np.linspace(0, beat, int(rate * beat), endpoint=False)
+            env = np.minimum(1.0, 8 * np.minimum(t, beat - t) / beat)
+            out.append(0.18 * env * np.sin(2 * math.pi * f * t))
+    pcm = (np.clip(np.concatenate(out), -1, 1) * 32767).astype(np.int16)
+    with closing(wave.open(path, "wb")) as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+        w.writeframes(pcm.tobytes())
+    return path
+
 _openai = None
 if os.getenv("OPENAI_API_KEY"):
     try:  # cloud voice (openai-tts branch); falls back to pyttsx3 below
@@ -235,6 +268,9 @@ class ReachyMiniRobot:
         self._follow = False
         self._th: Optional[threading.Thread] = None
         self._speaking = threading.Lock()
+        self._thinking = False
+        self._dance_t0 = 0.0
+        self._music_stop: Optional[threading.Event] = None
         if greet:
             self.greet()
 
@@ -507,6 +543,7 @@ class ReachyMiniRobot:
 
     def stop_following(self) -> None:
         self._follow = False
+        self.set_thinking(False)
         if getattr(self, "_chat_stop", None):
             self._chat_stop.set()
         if self._th:
@@ -536,6 +573,35 @@ class ReachyMiniRobot:
             self.logger.info("Heard: %s", heard)
             self.speak_stream(self.reply_stream(heard)).result()
 
+    def set_thinking(self, on: bool) -> None:
+        """Toggle 'thinking/doing' mode: swivel the body + loop elevator music.
+
+        The face-following loop keeps the gaze engaged (head counter-rotates the
+        body sway), so Reachy looks busy-but-attentive while you wait on it.
+        """
+        on = bool(on)
+        if on == self._thinking:
+            return
+        self._thinking = on
+        if on:
+            self._dance_t0 = time.time()
+            self._music_stop = threading.Event()
+            path = os.path.join(tempfile.gettempdir(), "reachy_elevator.wav")
+            if not os.path.exists(path):
+                _make_elevator_wav(path)
+            stop = self._music_stop
+
+            def _music():
+                while not stop.is_set():
+                    try:
+                        self.mini.media.play_sound(path)
+                    except Exception:
+                        pass
+                    time.sleep(8.0)
+            threading.Thread(target=_music, daemon=True).start()
+        elif self._music_stop is not None:
+            self._music_stop.set()
+
     def _loop(self) -> None:
         ax = ay = None  # last applied aim (deadzone gate)
         while self._follow:
@@ -564,7 +630,11 @@ class ReachyMiniRobot:
                 roll = self._tilt.roll(self._tracker.is_still())
                 if roll:
                     pose = _roll_pose(pose, roll)
-                self.mini.set_target(head=pose, antennas=antennas)
+                byaw = 0.0
+                if self._thinking:  # swivel body, counter-rotate head to keep gaze
+                    byaw = _swivel_yaw(time.time() - self._dance_t0)
+                    pose = _yaw_pose(pose, -byaw)
+                self.mini.set_target(head=pose, antennas=antennas, body_yaw=byaw)
             time.sleep(0.03)
 
     def close(self) -> None:
