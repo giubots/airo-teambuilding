@@ -101,8 +101,9 @@ class FaceTracker:
     so the head centers on the face instead of the brow.
     """
 
-    def __init__(self, smooth: float = 0.4, lock_gate: int = 350,
-                 aim_down_frac: float = 0.45, detect_width: int = 1920) -> None:
+    def __init__(self, smooth: float = 0.2, lock_gate: int = 320,
+                 aim_down_frac: float = 0.45, detect_width: int = 1920,
+                 hold_secs: float = 2.0, deadzone: int = 14) -> None:
         self.detector = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
@@ -110,13 +111,20 @@ class FaceTracker:
         self.lock_gate = lock_gate
         self.aim_down_frac = aim_down_frac
         self.detect_width = detect_width
+        self.hold_secs = hold_secs
+        self.deadzone = deadzone
         self.sx: Optional[float] = None
         self.sy: Optional[float] = None
-        self._still_since: Optional[float] = None  # when the face went still
+        self._still_since: Optional[float] = None
+        self._seen = 0.0
 
     def is_still(self, settle: float = 1.5) -> bool:
         """True once the locked face has barely moved for `settle` seconds."""
         return self._still_since is not None and (time.time() - self._still_since) > settle
+
+    def has_lock(self) -> bool:
+        """Locked or coasting: aim valid and last seen within hold window."""
+        return self.sx is not None and (time.time() - self._seen) < self.hold_secs
 
     def detect(self, frame) -> List[Face]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # SDK frames are BGR
@@ -127,25 +135,33 @@ class FaceTracker:
                 for (x, y, w, h) in boxes]
 
     def update(self, faces: List[Face]) -> Optional[Tuple[float, float]]:
+        """Sticky-lock the same face; coast on the last aim during brief losses."""
+        now = time.time()
         if not faces:
-            return None
-        cand = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
-        pick = cand[0]
-        if self.sx is not None:
-            near = [f for f in cand
+            if self.sx is not None and now - self._seen > self.hold_secs:
+                self.sx = self.sy = self._still_since = None
+            return (self.sx, self.sy) if self.sx is not None else None
+        if self.has_lock():
+            near = [f for f in faces
                     if abs(f[0] + f[2] / 2 - self.sx) < self.lock_gate
                     and abs(f[1] + f[3] / 2 - self.sy) < self.lock_gate]
-            if near:
-                pick = near[0]
+            pick = min(near, key=lambda f: (f[0] + f[2] / 2 - self.sx) ** 2
+                       + (f[1] + f[3] / 2 - self.sy) ** 2) if near \
+                else max(faces, key=lambda f: f[2] * f[3])
+        else:
+            pick = max(faces, key=lambda f: f[2] * f[3])
         x, y, w, h = pick
         u = x + w / 2
         v = y + h * (0.5 + self.aim_down_frac)
-        a = self.smooth
-        prev_x, prev_y = self.sx, self.sy
-        self.sx = u if self.sx is None else a * u + (1 - a) * self.sx
-        self.sy = v if self.sy is None else a * v + (1 - a) * self.sy
-        if prev_x is None or abs(self.sx - prev_x) > 25 or abs(self.sy - prev_y) > 25:
-            self._still_since = time.time()  # moved: reset stillness timer
+        if self.sx is None:
+            self.sx, self.sy, self._still_since = u, v, now
+        else:
+            a = self.smooth
+            self.sx += a * (u - self.sx)
+            self.sy += a * (v - self.sy)
+            if abs(u - self.sx) > 25 or abs(v - self.sy) > 25:
+                self._still_since = now
+        self._seen = now  # moved: reset stillness timer
         return self.sx, self.sy
 
 
@@ -211,27 +227,28 @@ class ReachyMiniRobot:
         self.mini.goto_target(create_head_pose(), antennas=[0.0, 0.0], duration=1.0)
 
     def _loop(self) -> None:
-        miss = 0
+        ax = ay = None  # last applied aim (deadzone gate)
         while self._follow:
             frame = self.mini.media.get_frame()
             if frame is None:
                 time.sleep(0.02)
                 continue
-            aim = self._tracker.update(self._tracker.detect(frame))
-            miss = 0 if aim else miss + 1
+            self._tracker.update(self._tracker.detect(frame))
 
             # Ears wiggle now and then while the focused (front) person talks.
             try:
                 doa = self.mini.media.get_DoA()
             except Exception:
                 doa = None
-            talking = (doa is not None and doa[1] and aim
+            talking = (doa is not None and doa[1] and self._tracker.has_lock()
                        and abs(doa[0] - math.pi / 2) < 0.9)
             antennas = self._ears.antennas(talking)
 
-            if self._tracker.sx is not None and miss < 8:
-                pose = self.mini.look_at_image(int(self._tracker.sx),
-                                               int(self._tracker.sy),
+            if self._tracker.has_lock():
+                if ax is None or abs(self._tracker.sx - ax) > self._tracker.deadzone \
+                        or abs(self._tracker.sy - ay) > self._tracker.deadzone:
+                    ax, ay = self._tracker.sx, self._tracker.sy
+                pose = self.mini.look_at_image(int(ax), int(ay),
                                                duration=0, perform_movement=False)
                 # Sitting still: occasionally tilt the head, ease over and back.
                 roll = self._tilt.roll(self._tracker.is_still())
