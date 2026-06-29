@@ -4,14 +4,13 @@ Mirror of ``reachy/core/playbook.py`` adapted to the :class:`ReachyMiniRobot`
 class. Strict turn-taking: the robot is EITHER listening/talking OR thinking,
 never both at once. The flow is:
 
-  1. Listen until someone says the wake phrase 'Hi Lionel!'.
-  2. Reply: 'Hi, nice to see you! What do you want me to grab from your backpack?'
-  3. Listen, then ask the LLM for the object as ``{noun, adjective}`` JSON
+  1. Greet: 'Hi, nice to see you! What do you want me to grab from your backpack?'
+  2. Listen, then ask the LLM for the object as ``{noun, adjective}`` JSON
      (at most one relevant adjective), saved to a JSON file and securely copied
      to a remote server over SSH (SCP) for the picker to use.
-  4. Say 'Okay, let me search for <words>.'
-  5. Enter thinking/dance mode while the robot 'picks' the item from the backpack.
-  6. When the operator ends thinking mode, say 'Happy to help!' and loop.
+  3. Say 'Okay, let me search for <words>.'
+  4. Enter thinking/dance mode while the robot 'picks' the item from the backpack.
+  5. When the operator ends thinking mode, say 'Happy to help!' and loop.
 
 Thinking is driven through :meth:`ReachyMiniRobot.set_thinking`, so the head and
 music stay with the robot's follow loop and the two modes never overlap.
@@ -223,26 +222,18 @@ def run_playbook(robot, stop: "threading.Event", listen_secs: float = 4.0) -> No
     ``robot.set_thinking(True)`` (the operator turns it back off to signal
     'done picking').
     """
-    print("Playbook ready. Say 'Hi Lionel!' to start.")
+    print("Playbook ready. Lionel will greet and ask what to fetch.")
     while not stop.is_set():
         # --- LISTEN/TALK mode: never while thinking -------------------------
         if robot.thinking:
             time.sleep(0.15)
             continue
 
-        # 1. Wait for the wake phrase.
-        heard = robot.listen(listen_secs)
-        if stop.is_set():
-            break
-        if not is_wake(heard):
-            continue
-        print(f"Wake heard: {heard}")
-
-        # 2. Greet and ask what to fetch.
+        # 1. Greet and ask what to fetch.
         robot.say("Hi, nice to see you! What do you want me to grab "
                   "from your backpack?", block=True)
 
-        # 3. Listen for the item (a couple of tries).
+        # 2. Listen for the item (a couple of tries).
         item_text = ""
         for _ in range(2):
             if stop.is_set():
@@ -259,26 +250,26 @@ def run_playbook(robot, stop: "threading.Event", listen_secs: float = 4.0) -> No
             continue
         print(f"You: {item_text}")
 
-        # 4. Extract the structured request, save it and upload it for the picker.
+        # 3. Extract the structured request, save it and upload it for the picker.
         item = extract_item(item_text)
         path = save_request(item)
         upload_request_async(path)
         words = item_words(item) or "that"
         print(f"Backpack request -> {json.dumps(item)}  (saved: {path})")
 
-        # 5. Acknowledge what we're looking for.
+        # 4. Acknowledge what we're looking for.
         robot.say(f"Okay, let me search for {words}.", block=True)
 
-        # 6. --- THINKING mode: pick the item; no listening/talking here ------
+        # 5. --- THINKING mode: pick the item; no listening/talking here ------
         robot.set_thinking(True)
 
-        # 7. Wait for the operator to end thinking mode (the 'picking' is done).
+        # 6. Wait for the operator to end thinking mode (the 'picking' is done).
         while robot.thinking and not stop.is_set():
             time.sleep(0.1)
         if stop.is_set():
             break
 
-        # 8. Back to talking mode.
+        # 7. Back to talking mode.
         robot.say("Happy to help!", block=True)
 
 
