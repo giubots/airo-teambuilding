@@ -216,21 +216,37 @@ class ReachyMiniRobot:
         self._ears = EarWiggle()
         self._follow = False
         self._th: Optional[threading.Thread] = None
+        self._speaking = threading.Lock()
         if greet:
             self.greet()
 
     def say(self, text: str, block: bool = True) -> None:
-        """Speak through the robot's own speaker (OpenAI TTS, else offline)."""
+        """Speak through the robot's own speaker (OpenAI TTS, else offline).
+
+        block=False offloads synthesis + playback to a background thread so the
+        face-following loop never freezes; overlapping calls are dropped.
+        """
         self.logger.info("Reachy says: %s", text)
         if not text.strip():
             return
+        if not block:
+            if self._speaking.acquire(blocking=False):
+                def run():
+                    try:
+                        self._do_say(text)
+                    finally:
+                        self._speaking.release()
+                threading.Thread(target=run, daemon=True).start()
+            return
+        self._do_say(text)
+
+    def _do_say(self, text: str) -> None:
         path = os.path.join(tempfile.gettempdir(), "reachy_say.wav")
         if not self._synth_wav(text, path):
             return
         try:
             self.mini.media.play_sound(path)
-            if block:
-                time.sleep(self._wav_seconds(path) + 0.2)
+            time.sleep(self._wav_seconds(path) + 0.2)
         except Exception as e:  # pragma: no cover - audio backend missing
             self.logger.warning("play_sound failed: %s", e)
 
@@ -304,7 +320,7 @@ class ReachyMiniRobot:
         self.mini.goto_target(antennas=[0.0, 0.0], duration=0.4)
 
     def greet(self) -> None:
-        self.say("Hello!")
+        self.say("Hello!", block=False)
         self.happy()
 
     def look(self) -> DoneLook:
