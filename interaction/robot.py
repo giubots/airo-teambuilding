@@ -54,8 +54,8 @@ def _sentence_end(buf: str) -> int:
     return -1
 
 
-_BODY_PEAK_DEG = 28.0   # body swivel each way in 'thinking' mode (<= safe yaw)
-_DANCE_PERIOD = 4.0     # seconds per full left-right-left sway
+_BODY_PEAK_DEG = 11.0   # gentle body swivel each way in 'thinking' mode (limits head motion)
+_DANCE_PERIOD = 5.0     # seconds per full left-right-left sway (relaxed)
 
 
 def _swivel_yaw(t: float) -> float:
@@ -64,7 +64,11 @@ def _swivel_yaw(t: float) -> float:
 
 
 def _yaw_pose(pose, yaw_rad: float):
-    """Rotate a 4x4 head pose about the vertical axis (to counter the body)."""
+    """Rotate a 4x4 head pose about the vertical axis.
+
+    Not used to keep gaze on the participant — with automatic_body_yaw the IK
+    already holds the world-frame head pose while the body swivels.
+    """
     c, s = math.cos(yaw_rad), math.sin(yaw_rad)
     rz = np.array([[c, -s, 0, 0], [s, c, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
     return pose @ rz
@@ -558,16 +562,22 @@ class ReachyMiniRobot:
         """Converse in the background while the head keeps tracking the face.
 
         Pauses the mic while Reachy speaks, and streams the reply
-        sentence-by-sentence so audio starts almost immediately.
+        sentence-by-sentence so audio starts almost immediately. While
+        thinking/dance mode is on the whole conversation stays silent: no
+        greeting, listening, replying or speaking.
         """
-        self.say("Hi! I'm Reachy. Talk to me!", block=False)
+        greeted = False
         while self._follow and not self._chat_stop.is_set():
-            if self._speaking.locked():
+            if self._thinking or self._speaking.locked():
                 time.sleep(0.15)
                 continue
+            if not greeted:  # greet only once we're actually allowed to speak
+                self.say("Hi! I'm Reachy. Talk to me!", block=False)
+                greeted = True
+                continue
             heard = self.listen(listen_secs)
-            if self._chat_stop.is_set():
-                break
+            if self._chat_stop.is_set() or self._thinking:
+                continue
             if not heard:
                 continue
             self.logger.info("Heard: %s", heard)
@@ -576,8 +586,10 @@ class ReachyMiniRobot:
     def set_thinking(self, on: bool) -> None:
         """Toggle 'thinking/doing' mode: swivel the body + loop elevator music.
 
-        The face-following loop keeps the gaze engaged (head counter-rotates the
-        body sway), so Reachy looks busy-but-attentive while you wait on it.
+        The face-following loop keeps the gaze engaged: the world-frame head
+        pose stays locked on the participant (the IK holds it while the body
+        swivels), so Reachy looks busy-but-attentive while you wait on it.
+        Speech is suppressed while thinking so the modes stay separate.
         """
         on = bool(on)
         if on == self._thinking:
@@ -631,9 +643,8 @@ class ReachyMiniRobot:
                 if roll:
                     pose = _roll_pose(pose, roll)
                 byaw = 0.0
-                if self._thinking:  # swivel body, counter-rotate head to keep gaze
+                if self._thinking:  # swivel the body; world-frame head stays on the face
                     byaw = _swivel_yaw(time.time() - self._dance_t0)
-                    pose = _yaw_pose(pose, -byaw)
                 self.mini.set_target(head=pose, antennas=antennas, body_yaw=byaw)
             time.sleep(0.03)
 
