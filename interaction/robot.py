@@ -119,10 +119,10 @@ class FaceTracker:
         return self._still_since is not None and (time.time() - self._still_since) > settle
 
     def detect(self, frame) -> List[Face]:
-        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # SDK frames are BGR
         scale = min(1.0, self.detect_width / gray.shape[1])
         small = cv2.equalizeHist(cv2.resize(gray, None, fx=scale, fy=scale))
-        boxes = self.detector.detectMultiScale(small, 1.1, 4, minSize=(48, 48))
+        boxes = self.detector.detectMultiScale(small, 1.1, 6, minSize=(80, 80))
         return [(int(x / scale), int(y / scale), int(w / scale), int(h / scale))
                 for (x, y, w, h) in boxes]
 
@@ -182,7 +182,7 @@ class ReachyMiniRobot:
         self.happy()
 
     def look(self) -> DoneLook:
-        """Grab a camera frame (RGB). Used by the interaction 'look' step."""
+        """Grab a camera frame (BGR). Used by the interaction 'look' step."""
         try:
             return DoneLook(True, self.mini.media.get_frame())
         except Exception as e:  # camera not ready
