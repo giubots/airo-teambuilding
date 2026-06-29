@@ -13,6 +13,7 @@ import math
 import os
 import queue
 import random
+import base64
 import tempfile
 import threading
 import time
@@ -28,6 +29,13 @@ import numpy as np
 
 from reachy_mini import ReachyMini
 from reachy_mini.utils import create_head_pose
+
+from dotenv import load_dotenv
+
+# Load OPENAI_API_KEY so the cloud "coral" voice is used (else falls back to
+# pyttsx3). Look at cwd and the repo root so it works regardless of launch dir.
+load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 _PERSONALITY_FILE = Path(__file__).with_name("personality.txt")
 _PERSONALITY = _PERSONALITY_FILE.read_text(encoding="utf-8").strip() if _PERSONALITY_FILE.exists() else ""
@@ -467,6 +475,21 @@ class ReachyMiniRobot:
         except Exception as e:  # camera not ready
             self.logger.warning("look failed: %s", e)
             return DoneLook(False, None)
+
+    def capture_base64(self, fmt: str = "jpeg", quality: int = 90,
+                       data_url: bool = False) -> Optional[str]:
+        """One camera frame as a base64 string (JPEG/PNG), or data URL; None if no frame."""
+        frame = self.mini.media.get_frame()
+        if frame is None:
+            return None
+        ext = ".png" if fmt.lower() == "png" else ".jpg"
+        params = [] if ext == ".png" else [cv2.IMWRITE_JPEG_QUALITY, int(quality)]
+        ok, buf = cv2.imencode(ext, frame, params)  # SDK frames are BGR, as cv2 expects
+        if not ok:
+            return None
+        b64 = base64.b64encode(buf).decode("ascii")
+        mime = "png" if ext == ".png" else "jpeg"
+        return f"data:image/{mime};base64,{b64}" if data_url else b64
 
     def start_following(self, chat: bool = False) -> None:
         if self._follow:
