@@ -60,11 +60,12 @@ class Communication:
         self.clients_lock = Lock()
         self.callbacks = defaultdict(list)
         self.callbacks_lock = Lock()
-        server = serve(self._handler, "localhost", port)
+        server = serve(self._handler, "0.0.0.0", port)
         self.ws_th = Thread(target=server.serve_forever, daemon=True)
         self.ws_th.start()
 
     def _handler(self, websocket) -> None:
+        self.logger.info("Client connected")
         with self.clients_lock:
             self.clients.append(websocket)
         try:

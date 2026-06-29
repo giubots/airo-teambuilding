@@ -20,7 +20,7 @@ class DemoInteraction:
     dialogue: DemoDialogue
     comm: Communication
 
-    def __init__(self):
+    def __init__(self, comm: Communication):
         instructions = (
             "You are a helpful assistant that can answer questions about the world."
         )
@@ -55,7 +55,7 @@ class DemoInteraction:
             instructions=instructions,
             vlm=self.gpt,
         )
-        self.comm = Communication()
+        self.comm = comm
         threading.Thread(target=self.communicate_feedback_loop, daemon=True).start()
 
     def look_find_fetch(self, request: str):
@@ -110,8 +110,9 @@ class DemoInteraction:
             )
 
 
-def main():
-    demo = DemoInteraction()
+def start_chat(comm: Communication):
+    print("Starting chat")
+    demo = DemoInteraction(comm)
     try:
         while True:
             user = input("User: ")
@@ -120,6 +121,20 @@ def main():
     except KeyboardInterrupt:
         demo.comm.stop_async()
         demo.comm.wait_done_stop()
+
+def analyse():
+    print("Analysing the image")
+
+def relay_message():
+    print("Relaying the message")
+
+
+def main():
+    comm = Communication()
+    comm.register_callback("start", start_chat)
+    comm.register_callback("done-look", analyse)
+    comm.register_callback("done-find", relay_message)
+    start_chat(comm)
 
 
 if __name__ == "__main__":
