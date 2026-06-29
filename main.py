@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from interaction.communication import Communication
 from interaction.dialogue import DemoDialogue
+from interaction.robot import ReachyMiniRobot
 from vision_enabled_dialogue.conversation_history.parts import Frame
 from vision_enabled_dialogue.llm import GPT
 
@@ -56,6 +57,12 @@ class DemoInteraction:
             vlm=self.gpt,
         )
         self.comm = comm
+        try:
+            self.robot = ReachyMiniRobot(greet=True)
+            self.robot.start_following()
+        except Exception as e:
+            print(f"Reachy Mini unavailable, continuing without robot: {e}")
+            self.robot = None
         threading.Thread(target=self.communicate_feedback_loop, daemon=True).start()
 
     def look_find_fetch(self, request: str):
@@ -116,9 +123,13 @@ def start_chat(comm: Communication):
     try:
         while True:
             user = input("User: ")
+            if demo.robot:
+                demo.robot.happy()
             demo.dialogue.dm.add_turn(user, time())
             demo.dialogue.dm.generate_response()
     except KeyboardInterrupt:
+        if demo.robot:
+            demo.robot.close()
         demo.comm.stop_async()
         demo.comm.wait_done_stop()
 
