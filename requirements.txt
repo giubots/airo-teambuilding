@@ -2,6 +2,8 @@ gitdb==4.0.12
 GitPython==3.1.47
 jaraco.context==6.1.0
 packaging==26.2
+pillow
+python-dotenv
 setuptools==78.1.1
 smmap==5.0.3
 websockets==16.0
