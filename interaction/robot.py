@@ -10,6 +10,7 @@ The connection auto-detects Lite vs Wireless and localhost vs network.
 
 import logging
 import math
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -36,6 +37,55 @@ def _roll_pose(pose, roll_rad: float):
     c, s = math.cos(roll_rad), math.sin(roll_rad)
     rx = np.array([[1, 0, 0, 0], [0, c, -s, 0], [0, s, c, 0], [0, 0, 0, 1]])
     return pose @ rx
+
+
+class IdleTilt:
+    """Occasional relaxed head tilt: once in a while, ease over and back."""
+
+    def __init__(self, peak_deg: float = 13.0, dur: float = 3.0,
+                 gap: Tuple[float, float] = (10.0, 18.0)) -> None:
+        self.peak = math.radians(peak_deg)
+        self.dur = dur
+        self.gap = gap
+        self._t0: Optional[float] = None
+        self._dir = 1.0
+        self._next = time.time() + random.uniform(*gap)
+
+    def roll(self, still: bool) -> float:
+        """Roll (rad) to apply now: a single eased tilt, else 0 while waiting."""
+        now = time.time()
+        if self._t0 is not None:
+            t = now - self._t0
+            if t >= self.dur:
+                self._t0, self._next = None, now + random.uniform(*self.gap)
+                return 0.0
+            return self.peak * self._dir * math.sin(math.pi * t / self.dur)
+        if still and now >= self._next:
+            self._t0, self._dir = now, random.choice([-1.0, 1.0])
+        return 0.0
+
+
+class EarWiggle:
+    """Occasional ear wiggle: a brief burst, then a quiet cooldown."""
+
+    def __init__(self, dur: float = 0.9, gap: Tuple[float, float] = (5.0, 10.0)) -> None:
+        self.dur = dur
+        self.gap = gap
+        self._t0: Optional[float] = None
+        self._next = 0.0
+
+    def antennas(self, talking: bool) -> List[float]:
+        now = time.time()
+        if self._t0 is not None:
+            t = now - self._t0
+            if t >= self.dur:
+                self._t0, self._next = None, now + random.uniform(*self.gap)
+                return [0.0, 0.0]
+            w = math.sin(2 * math.pi * 3.0 * t) * 0.4 * math.sin(math.pi * t / self.dur)
+            return [w, -w]
+        if talking and now >= self._next:
+            self._t0 = now
+        return [0.0, 0.0]
 
 
 @dataclass
@@ -109,6 +159,8 @@ class ReachyMiniRobot:
         self.mini = ReachyMini(media_backend="default")
         self.mini.goto_target(create_head_pose(), antennas=[0.0, 0.0], duration=1.0)
         self._tracker = FaceTracker()
+        self._tilt = IdleTilt()
+        self._ears = EarWiggle()
         self._follow = False
         self._th: Optional[threading.Thread] = None
         if greet:
@@ -168,23 +220,22 @@ class ReachyMiniRobot:
             aim = self._tracker.update(self._tracker.detect(frame))
             miss = 0 if aim else miss + 1
 
-            # Wiggle the antennas while the focused (front) person is talking.
-            antennas = [0.0, 0.0]
+            # Ears wiggle now and then while the focused (front) person talks.
             try:
                 doa = self.mini.media.get_DoA()
             except Exception:
                 doa = None
-            if doa is not None and doa[1] and aim and abs(doa[0] - math.pi / 2) < 0.9:
-                wig = math.sin(2 * math.pi * 3.0 * time.time()) * 0.4
-                antennas = [wig, -wig]
+            talking = (doa is not None and doa[1] and aim
+                       and abs(doa[0] - math.pi / 2) < 0.9)
+            antennas = self._ears.antennas(talking)
 
             if self._tracker.sx is not None and miss < 8:
                 pose = self.mini.look_at_image(int(self._tracker.sx),
                                                int(self._tracker.sy),
                                                duration=0, perform_movement=False)
-                # Sitting still: relaxed back-and-forth head tilt (slow roll).
-                if self._tracker.is_still():
-                    roll = math.radians(13) * math.sin(2 * math.pi * 0.2 * time.time())
+                # Sitting still: occasionally tilt the head, ease over and back.
+                roll = self._tilt.roll(self._tracker.is_still())
+                if roll:
                     pose = _roll_pose(pose, roll)
                 self.mini.set_target(head=pose, antennas=antennas)
             time.sleep(0.03)
