@@ -1,9 +1,12 @@
 import json
 import logging
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
-from threading import Condition, Thread
-from typing import Generator
+from gc import callbacks
+from threading import Condition, Lock, Thread
+from tkinter import N
+from typing import Callable, Generator
 
 from websockets import ConnectionClosed
 from websockets.sync.server import ServerConnection, serve
@@ -41,53 +44,71 @@ class Feedback:
 
 class Communication:
     logger: logging.Logger
-    new_pending: Condition
-    pending: list[dict]
+    pending: dict[str, dict | None]
+    pending_cond: Condition
     clients: list[ServerConnection]
+    clients_lock: Lock
+    callbacks: dict[str, list[Callable]]
+    callbacks_lock: Lock
     ws_th: Thread
 
     def __init__(self, port: int = 8765) -> None:
         self.logger = logging.getLogger(__name__)
-        self.new_pending = Condition()
-        self.pending = []
+        self.pending = defaultdict(lambda: None)
+        self.pending_cond = Condition()
+        self.clients = []
+        self.clients_lock = Lock()
+        self.callbacks = defaultdict(list)
+        self.callbacks_lock = Lock()
         server = serve(self._handler, "localhost", port)
         self.ws_th = Thread(target=server.serve_forever, daemon=True)
         self.ws_th.start()
 
+    def _handler(self, websocket) -> None:
+        with self.clients_lock:
+            self.clients.append(websocket)
+        try:
+            for message in websocket:
+                data = json.loads(message)
+                self._send_to_all_clients(message)
+                with self.callbacks_lock:
+                    for callback in self.callbacks[data["type"]]:
+                        callback(data["payload"])
+                with self.pending_cond:
+                    self.pending[data["type"]] = data["payload"]
+                    self.pending_cond.notify_all()
+        except ConnectionClosed:
+            self.logger.info("Client disconnected from _handler")
+        finally:
+            with self.clients_lock:
+                self.clients.remove(websocket)
+
     def _send_to_all_clients(self, message: str) -> None:
-        for client in self.clients:
-            try:
-                client.send(message)
-            except ConnectionClosed:
+        to_remove = []
+        with self.clients_lock:
+            for client in self.clients:
+                try:
+                    client.send(message)
+                except ConnectionClosed:
+                    self.logger.info("Client disconnected from _send_to_all_clients")
+                    to_remove.append(client)
+            for client in to_remove:
                 self.clients.remove(client)
 
-    def _handler(self, websocket) -> None:
-        self.clients.append(websocket)  # FIXME: multithreading will break
-        for message in websocket:
-            data = json.loads(message)
-            self._send_to_all_clients(message)
-            with self.new_pending:
-                self.pending.append(data)
-                self.new_pending.notify_all()
+    def _send(self, type: str, payload: dict) -> None:
+        message = json.dumps({"stamp": time.time(), "type": type, "payload": payload})
+        self._send_to_all_clients(message)
 
     def _wait_for(self, m_type: str) -> dict:
         while True:
-            with self.new_pending:
-                for i, data in enumerate(self.pending):
-                    if data["type"] == m_type:
-                        return self.pending.pop(i)["payload"]
-                self.new_pending.wait()
+            with self.pending_cond:
+                if self.pending[m_type] is not None:
+                    return self.pending[m_type]  # type: ignore
+                self.pending_cond.wait()
 
-    def _send(self, type: str, payload: dict) -> None:
-        self._send_to_all_clients(
-            json.dumps(
-                {
-                    "stamp": time.time(),
-                    "type": type,
-                    "payload": payload,
-                }
-            )
-        )
+    def register_callback(self, m_type: str, callback: Callable) -> None:
+        with self.callbacks_lock:
+            self.callbacks[m_type].append(callback)
 
     def look_async(self) -> None:
         self._send("look", {})
