@@ -314,6 +314,63 @@ class ReachyMiniRobot:
                 time.sleep(0.01)
         return np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
 
+    def listen(self, seconds: float = 5.0) -> str:
+        """Record from the robot mic and transcribe it (gpt-4o-mini-transcribe)."""
+        samples = self.record(seconds)
+        if samples.size == 0 or _openai is None:
+            return ""
+        try:
+            sr = max(1, self.mini.media.get_input_audio_samplerate())
+        except Exception:
+            sr = 16000
+        path = os.path.join(tempfile.gettempdir(), "reachy_listen.wav")
+        pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
+        with closing(wave.open(path, "wb")) as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+            w.writeframes(pcm.tobytes())
+        try:
+            with open(path, "rb") as f:
+                r = _openai.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe", file=f, language="en")
+            return (r.text or "").strip()
+        except Exception:
+            return ""
+
+    def reply(self, text: str) -> str:
+        """One-or-two-sentence reply in the child personality (rolling history)."""
+        if not hasattr(self, "_chat"):
+            sys_p = (_PERSONALITY + " Keep replies to one or two short sentences. "
+                     "Use plain words only, no emoji. "
+                     "You are a small robot named Reachy talking face to face.")
+            self._chat = [{"role": "system", "content": sys_p}]
+        self._chat.append({"role": "user", "content": text})
+        if _openai is None:
+            out = "Wow, that's so cool! Tell me more!"
+        else:
+            try:
+                r = _openai.chat.completions.create(model="gpt-4o-mini", temperature=0.8,
+                                                    max_tokens=80, messages=self._chat)
+                out = (r.choices[0].message.content or "").strip()
+            except Exception:
+                out = "Hmm, I didn't quite get that. Say it again?"
+        self._chat.append({"role": "assistant", "content": out})
+        if len(self._chat) > 17:
+            self._chat = [self._chat[0]] + self._chat[-16:]
+        return out
+
+    def converse(self, turns: int = 6, listen_secs: float = 5.0) -> None:
+        """Short spoken back-and-forth: listen, think, speak — `turns` times."""
+        self.say("Hi! I'm Reachy. Talk to me!", block=True)
+        for _ in range(turns):
+            heard = self.listen(listen_secs)
+            if not heard:
+                self.say("I didn't catch that. Try again!", block=True)
+                continue
+            self.logger.info("Heard: %s", heard)
+            self.say(self.reply(heard), block=True)
+        self.say("Bye bye! That was fun!", block=True)
+
+
     def happy(self) -> None:
         self.mini.goto_target(antennas=[0.5, -0.5], duration=0.4)
         self.mini.goto_target(antennas=[-0.5, 0.5], duration=0.4)
