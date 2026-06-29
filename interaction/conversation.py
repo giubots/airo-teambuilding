@@ -1,22 +1,25 @@
-"""Standalone demo: have a little spoken conversation with the Reachy Mini.
+"""Standalone demo: Reachy follows your face AND chats at the same time.
 
 Start a daemon first: `reachy-mini-daemon` (add `--sim` for simulation) and set
 OPENAI_API_KEY (a .env is auto-loaded), then:
     python -m interaction.conversation
-Reachy greets, listens on its mic, transcribes your speech, and replies in its
-playful child voice through its own speaker. Ctrl+C to stop.
+Reachy tracks the forefront face (idle tilt + ear wiggles) while listening on
+its mic, transcribing, and replying in its child voice through its speaker.
+Ctrl+C to stop.
 """
+
+import time
 
 from interaction.robot import ReachyMiniRobot
 
 
 def main() -> None:
     robot = ReachyMiniRobot(greet=False)
+    robot.start_following(chat=True)
     try:
-        robot.converse(turns=6, listen_secs=5.0)
+        while True:
+            time.sleep(0.5)
     except KeyboardInterrupt:
-        pass
-    finally:
         robot.close()
 
 

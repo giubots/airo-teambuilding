@@ -388,7 +388,7 @@ class ReachyMiniRobot:
             self.logger.warning("look failed: %s", e)
             return DoneLook(False, None)
 
-    def start_following(self) -> None:
+    def start_following(self, chat: bool = False) -> None:
         if self._follow:
             return
         self._follow = True
@@ -398,9 +398,14 @@ class ReachyMiniRobot:
             self.logger.warning("mic start failed: %s", e)
         self._th = threading.Thread(target=self._loop, daemon=True)
         self._th.start()
+        if chat:
+            self._chat_stop = threading.Event()
+            threading.Thread(target=self._chat_loop, daemon=True).start()
 
     def stop_following(self) -> None:
         self._follow = False
+        if getattr(self, "_chat_stop", None):
+            self._chat_stop.set()
         if self._th:
             self._th.join(timeout=1.0)
         try:
@@ -408,6 +413,24 @@ class ReachyMiniRobot:
         except Exception:
             pass
         self.mini.goto_target(create_head_pose(), antennas=[0.0, 0.0], duration=1.0)
+
+    def _chat_loop(self, listen_secs: float = 4.0) -> None:
+        """Converse in the background while the head keeps tracking the face.
+
+        Pauses the mic while Reachy is speaking so it won't hear its own voice.
+        """
+        self.say("Hi! I'm Reachy. Talk to me!", block=False)
+        while self._follow and not self._chat_stop.is_set():
+            if self._speaking.locked():
+                time.sleep(0.15)
+                continue
+            heard = self.listen(listen_secs)
+            if self._chat_stop.is_set():
+                break
+            if not heard:
+                continue
+            self.logger.info("Heard: %s", heard)
+            self.say(self.reply(heard), block=False)
 
     def _loop(self) -> None:
         ax = ay = None  # last applied aim (deadzone gate)
